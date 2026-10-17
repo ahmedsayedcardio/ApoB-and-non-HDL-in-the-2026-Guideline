@@ -1,0 +1,2327 @@
+---
+title: "2026 ACC/AHA Lipid Guidelines Update"
+subtitle: "An Analysis from NHANES"
+format: 
+  html:
+    toc: true
+    toc-expand: true
+    toc-location: body
+date: 09-09-2024
+theme: lightly
+author:
+  - name: "Ahmed Sayed (asu.ahmed.sayed@gmail.com)"
+    affiliations: "Rochester General Hospital, Rochester, New York, USA"
+embed-resources: true
+toc-title: Contents
+page-layout: full
+code-fold: true
+editor: visual
+editor_options: 
+  chunk_output_type: console
+---
+
+# Setup
+
+## Libraries
+
+```{r}
+#Load libs
+packs <- c("data.table", "dplyr", 
+           "stringr", "haven", "PooledCohort",
+           "ggplot2", "scales",  "survey",
+           "flextable", "ggsci", "ggthemes",
+           "scales", "Hmisc", "legendry",
+           "forcats", "rms"
+           )
+lapply(packs, require, character.only = TRUE)
+options(survey.lonely.psu = "adjust")
+```
+
+## Self-made functions
+
+### Analytic
+
+```{r}
+#Quantiles
+qs <- function(variable) quantile(variable, seq(0, 1, 0.05), na.rm = T)
+
+#Functions to create PE/CI
+make_pe_ci_mil <- function(pe, lci, uci) {
+  paste0(pe %>% tomil,
+         " [", lci %>% tomil, " to ", uci %>% tomil, "]") %>% str_replace("\\[ ", "\\[")
+}
+
+make_pe_ci <- function(pe, lci, uci, round_n = 1) {
+  paste0(pe %>% round(round_n) %>% format(nsmall = round_n),
+         " [", lci %>% round(round_n) %>% format(nsmall = round_n), " to ", uci %>% round(round_n) %>% format(nsmall = round_n), "]") %>% str_replace("\\[ ", "\\[")
+}
+
+make_prop_pe_ci <- function(prop_pe, prop_lci, prop_uci) {
+paste0( (100*prop_pe) %>% r1,
+                                " [", (100*prop_lci) %>% r1, " to ", (100*prop_uci) %>% r1, "]") %>% str_replace("\\[ ", "\\[")
+}
+
+make_prop_pe_ci_pct <- function(prop_pe, prop_lci, prop_uci) {
+  paste0( (100*prop_pe) %>% r1,
+          "% [95%CI: ", (100*prop_lci) %>% r1, " to ", (100*prop_uci) %>% r1, "%]") %>%
+    str_replace("\\[ ", "\\[")
+  
+}        
+
+
+#Function to rename columns. Please note that this is a more general function not intended purely for this analysis and therefore contains other variables irrelevant to it.
+nhanes_rename <- function(x) { x %>% rename(any_of(c(
+  #Survey cycle and demographics
+  "survey_cycle" = "SDDSRVYR",
+  "age" = "RIDAGEYR",
+  "sex" = "RIAGENDR",
+  "race" = "RIDRETH3",
+  #Medical conditions
+  "htn" = "BPQ020",
+  "dyslipid" = "BPQ080",
+  "dm_self_report" = "DIQ010",
+  "pre_dm" = "DIQ160",
+  "chd" = "MCQ160C",
+  "angina" = "MCQ160D",
+  "mi" = "MCQ160E",
+  "stroke" = "MCQ160F",
+  "smoke_100" = "SMQ020",
+  "smoke_now" = "SMQ040",
+  "cancer" = "MCQ220",
+  "dialysis" = "KIQ025",
+  "failing_kidney" = "KIQ022",
+  "hf" = "MCQ160B",
+  #Medical recommendations
+  "salt_adv_take" = "MCQ371C",
+  "chol_meds_adv" = "BPQ090D",
+  "chol_meds_take" = "BPQ100D",
+  "chol_meds_take" = "BPQ101D",
+  "htn_meds_adv" = "BPQ040A",
+  "htn_meds_take" = "BPQ050A",
+  "htn_meds_take" = "BPQ150",
+  "aspirin_adv" = "RXQ510",
+  "aspirin_adv_take" = "RXQ515",
+  "aspirin_indep" = "RXQ520",
+  #Exam data
+  "sbp_1" = "BPXOSY1",
+  "sbp_2" = "BPXOSY2",
+  "sbp_3" = "BPXOSY3",
+  "sbp_1" = "BPXSY1",
+  "sbp_2" = "BPXSY2",
+  "sbp_3" = "BPXSY3",
+  "dbp_1" = "BPXODI1",
+  "dbp_2" = "BPXODI2",
+  "dbp_3" = "BPXODI3",
+  "dbp_1" = "BPXDI1",
+  "dbp_2" = "BPXDI2",
+  "dbp_3" = "BPXDI3",
+  "bmi" = "BMXBMI",
+  "waist" = "BMXWAIST",
+  #Lab values
+  "fasting_glucose" = "LBXGLU",
+  "hba1c" = "LBXGH",
+  "apo_b" = "LBXAPB",
+  "ldl" = "LBDLDL",
+  "ldl_mh" = "LBDLDLM",
+  "ldl_nih" = "LBDLDLN",
+  "tg" = "LBXTR",
+  "tg" = "LBXTLG",
+  "hdl" = "LBDHDD",
+  "tc" = "LBXTC",
+  "creatinine" = "LBXSCR",
+  "urine_creatinine" = "URXUCR",
+  "urine_albumin" = "URXUMS",
+  "platelets" = "LBXPLTSI",
+  "hiv_combo_1516" = "LBXHIVC",
+  "hiv_confirm_1516"= "LBXHNAT",
+  "hiv_1114" = "LBDHI"
+  
+)))
+}
+
+
+#Import an nhanes file given an NHANES folder and file
+import_nhanes <- function(nhanes_pair) {
+          
+          #State directory of files
+          files <- dir(paste0(nhanes_dir, nhanes_pair[1])) %>%
+            #select relevant data
+            str_subset("(_I|_H|_G)\\.")
+          
+          
+          #Import files in a given subfolder (lapply is not needed here, but it is made to be more general in case you need more than 1 file a year)
+          lapply(files,
+                 function(file) {
+                    
+                    #Read the file
+                    data <- read_xpt(file = paste0(nhanes_dir, 
+                                                   nhanes_pair[1], "/", 
+                                                   file)
+                                     )
+                    #Rename columns
+                    data <- nhanes_rename(data)
+                    
+                    #If meds, start command to join medications together
+                    if(nhanes_pair[2] == "meds") {
+                      
+                      #Join medications together
+                      if("RXDDRUG" %in% colnames(data)) {
+                        data <- data %>%
+                          group_by(SEQN) %>%
+                          summarise(drug_names = paste(RXDDRUG, collapse = "; ")
+                                    )
+                        
+                      } else if("RXD240B" %in% colnames(data)) {
+                        
+                        data <- data %>%
+                          group_by(SEQN) %>%
+                          summarise(drug_names = paste(RXD240B, collapse = "; "),
+                                    )
+                      }
+                    }
+                    
+                    #Return the object
+                    data
+                   
+                 }
+                    
+          ) %>%
+            #Use rbindlist in case you are importing several years at once
+            rbindlist(fill = T) -> data
+          
+          
+}
+
+#Convert 1/0 binaries
+convert_10 <- function(x) ifelse(x == 1, "yes", "no") %>% factor
+
+
+#Convert variables coded as 1279 in NHANES to Yes/No
+convert_1279 <- function(variable, yes_ind = "Yes", no_ind = "No") {
+  fcase(variable == 1, yes_ind,
+        variable == 2, no_ind) %>% factor
+}
+
+
+
+#Convert race for PCE (White and Black only; everyone is assigned to White if they're not Black)
+convert_race_pce <-  function(variable) {
+  fcase(variable %in% c(1, 2, 3, 6, 7), "white",
+        variable == 4, "black"
+        )
+}
+
+#Convert race
+convert_race_complete <-  function(variable) {
+  fcase(variable %in% c(1, 2), "Hispanic",
+        variable == 3, "Non-Hispanic White",
+        variable == 4, "Non-Hispanic Black",
+        variable == 6, "Non-Hispanic Asian",
+        variable == 7, "Other (including multiracial)"
+        )
+}
+
+#Function to indicate if drug was taken
+find_drug <- function(drugs_column, drug_string, yes_ind = "Yes", no_ind = "No") {
+  fifelse(str_detect(drugs_column, drug_string), yes_ind, no_ind)
+}
+
+#Function to indicate if indication is present
+find_ind <- function(inds_column, ind_string, yes_ind = "Yes", no_ind = "No") {
+  fifelse(str_detect(inds_column, ind_string), yes_ind, no_ind)
+}
+
+
+#Create a function to get survey means and CIs
+svymean_df <- function(design, variables) {
+  
+  #Get chosen variables in the form of "or"
+  variables[2] %>%
+    #Convert to character
+    paste0 %>%
+    #Replace + with or
+    str_replace_all("\\+", "\\|") %>%
+    #Squish together
+    str_replace_all(" \\| ", "\\|") -> chosen_vars
+  
+  #Get the part of svymean's name that corresponds to the variable name
+  svymean(design = design, variables, na.rm = T) %>%
+    names %>%
+    str_extract(chosen_vars) -> chosen_vars
+  
+  
+  #Produce data.table containing the information on totals
+  data.table(
+    #Variable
+    var = chosen_vars,
+    #Variable level
+    #Total
+    pe = svymean(design = design, variables, na.rm = T) %>%
+      data.frame %>%
+      {.$mean},
+    #LCI
+    lci = svymean(design = design, variables, na.rm = T) %>% confint %>% data.frame %>% {.$X2.5..},
+    #UCI
+    uci = svymean(design = design, variables, na.rm = T) %>% confint %>% data.frame %>% {.$X97.5..}
+  ) -> mean_df
+  
+  
+  #Add PE/CI col
+  mean_df[, pe_ci := make_pe_ci(pe, lci, uci)]
+  
+  #Return
+  print(mean_df)
+  
+}
+
+ # design = subset(sdata_ldl, llt == "no" & old_1 == "no" & age < 40)
+ # variables = ~ old_2b
+# design = subset(sdata_ldl, eval(four_group_filters[[3]]) & llt == "yes" & race == "Non-Hispanic Black"); variables = ~ ldl_cat
+# design = subset(sdata_ldl,llt == "yes" & race == "Non-Hispanic White"); variables = ~ ldl_cat
+#Create a function to neatly get survey totals/proportions and confidence intervals
+
+
+svytotal_df <- function(design, variables) {
+  
+  
+  
+  #Get chosen variables in the form of "or"
+  variables[2] %>%
+    #Convert to character
+    paste0 %>%
+    #Replace + with or
+    str_replace_all("\\+", "\\|") %>%
+    #Squish together
+    str_replace_all(" \\| ", "\\|") -> chosen_vars
+  
+  if(nrow(design$variables) == 0) df <- data.table(
+  value = "yes",
+  pe = 0,
+  lci = 0,
+  uci = 0,
+  prop_pe = 0,
+  prop_lci = 0,
+  prop_uci = 0,
+  pe_ci = 0,
+  prop_pe_ci = 0,
+  prop_pe_ci_pct = 0
+) else {
+  
+  
+  #Get svytotal object
+  svytotal(design = design, variables, na.rm = T) -> svytotal_object
+  
+  #Get the part of svytotal's name that corresponds to the variable name
+  svytotal_object %>%
+    names %>%
+    str_extract(chosen_vars) -> chosen_vars
+  
+  #Get the part of svytotal's name that corresponds to the variable value
+  svytotal_object %>%
+    names %>%
+    str_remove_all(chosen_vars) -> chosen_vars_levels
+  
+  #Produce data.table containing the information on totals
+  data.table(
+    #Variable
+    var = chosen_vars,
+    #Variable level
+    value = chosen_vars_levels,
+    #Total
+    pe = svytotal_object %>%
+      data.frame %>%
+      {.$total},
+    #LCI
+    lci = svytotal_object %>% confint %>% data.frame %>% {.$X2.5..},
+    #UCI
+    uci = svytotal_object %>% confint %>% data.frame %>% {.$X97.5..}
+  ) -> total_df
+  
+  
+  
+  lapply(chosen_vars_levels,
+         function(level) {
+           form <- bquote(~ .(variables[[2]]) == .(level))
+           #Get proportion
+           svyciprop(design = design, 
+          formula = form, na.rm = T
+          ) %>% {data.table(
+               prop_pe = .[1],
+               prop_lci = attr(., "ci") %>% .["2.5%"],
+               prop_uci = attr(., "ci") %>% .["97.5%"]
+             )}
+         }
+  ) %>%
+    rbindlist -> props_df
+  
+  #Bind
+  df <- cbind(total_df, props_df)
+  
+  #Make pe/ci columns
+  df[, pe_ci := make_pe_ci_mil(pe, lci, uci) %>% str_squish]
+  df[, prop_pe_ci :=  make_prop_pe_ci(prop_pe, prop_lci, prop_uci) %>% str_squish]
+  df[, prop_pe_ci_pct :=  make_prop_pe_ci_pct(prop_pe, prop_lci, prop_uci) %>% str_squish]
+
+}
+  
+  
+  #Return
+  df
+  
+}
+
+#Function to bootstrap differences in eligibility
+boot_diff <- function(survey_object = sdata_rep, call_var) {
+withReplicates(
+  design = survey_object,
+  return.replicates = T,
+  theta = call_var
+) -> rep_result
+
+  #Collect
+  data.table(prop_pe = rep_result$theta[1],
+             prop_uci = rep_result$replicates %>% quantile(c(0.975)),
+             prop_lci = rep_result$replicates %>% quantile(c(0.025))
+             ) -> rep_result_df
+  
+  #Calculate absolutes
+  rep_result_df[, pe := prop_pe * sum(survey_object$variables$weight)]
+  rep_result_df[, lci := prop_lci * sum(survey_object$variables$weight)]
+  rep_result_df[, uci := prop_uci * sum(survey_object$variables$weight)]
+  
+  #Return
+  print(rep_result_df)
+}
+
+#Difference (without bootstrap, using a simplifying normality assumption)
+#Test
+# survey_object = sdata_ldl %>% subset(llt == "no" & obesity == "yes")
+# cond1 = expr(new_2a == "yes" & new_1 == "no")
+# cond2 = expr(old_2b == "yes" & old_1 == "no")
+
+diff_fn <- function(survey_object, cond1, cond2) {
+svymean(design = survey_object,
+        ~ 
+          I(eval(cond1)) +
+          I(eval(cond2)),
+        na.rm = T) -> svymean_object
+
+svycontrast(stat = svymean_object,
+            list(diff_new_old = 
+              c(
+                `I(eval(cond1))TRUE` = 1,
+                `I(eval(cond2))TRUE` = -1
+              )
+            )
+            ) -> svycontrast_object
+
+data.table(prop_pe = svycontrast_object,
+           prop_lci = svycontrast_object %>% confint %>% {.[, 1]},
+           prop_uci = svycontrast_object %>% confint %>% {.[, 2]}) -> result_df
+
+#Calculate absolutes
+result_df[, pe := prop_pe * sum(survey_object$variables$weight)]
+result_df[, lci := prop_lci * sum(survey_object$variables$weight)]
+result_df[, uci := prop_uci * sum(survey_object$variables$weight)]
+
+#Return
+result_df
+}
+
+
+```
+
+### Aesthetic
+
+```{r}
+
+#Create PE (CI) column
+pe_ci <- function(pe = pe, lci = lci, uci = uci, rounding = 2) {
+  paste0(
+    pe  %>% round(rounding) %>% format(nsmall = rounding), " (", 
+    lci %>% round(rounding) %>% format(nsmall = rounding), " to ",
+    uci  %>% round(rounding) %>% format(nsmall = rounding),
+    ")"
+  )
+}
+
+
+#Functions to format p
+p <- function(p) {
+  ifelse(p < 0.001, "<0.001", ifelse(round(p, 2) == 0.05 | round(p, 2) == 0, round(p, 3) %>% format(nsmall = 3), round(p, 3) %>% format(nsmall = 3))) %>% as.character
+}
+
+#Loop over numeric variables, sex, and binary (Yes/no) variables and summarize
+sum_var <- function(dataset, variable) {
+  #Numeric vars 
+  if(variable %in% numeric_variables) {
+    dataset[, 
+      paste0(median(get(variable), na.rm = T) %>% round(1) %>% format(nsmall = 1),
+             " (", 
+             iqr(get(variable)), ")"
+      )
+    ]
+  } 
+  
+  #Sex
+  else if(variable %>% str_detect("sex|gender")) {
+    paste0(dataset[get(variable) %in% c("female", "Female", "Women", "women"), .N] %>% scales::comma(),
+           " (", (100*dataset[get(variable) %in% c("female", "Female", "Women", "women"), .N]/dataset[, .N]) %>% r1, "%)")
+  }
+  
+  #Binary vars
+  else if(variable %in% binary_variables) {
+    paste0(dataset[get(variable) %in% c("Yes", "yes"), .N] %>% scales::comma(),
+           " (", (100*dataset[get(variable) %in% c("Yes", "yes"), .N]/dataset[, .N]) %>% r1, "%)")
+  }
+}
+
+
+#Get IQRs
+iqr <- function(x, rounding = 1) {
+  paste0(
+    quantile(x, 0.25, na.rm = T) %>% round(rounding) %>% format(nsmall = rounding),
+    " to ",
+    quantile(x, 0.75, na.rm = T) %>% round(rounding) %>% format(nsmall = rounding)
+  )
+  
+}
+
+#Round to 1 decimal and include zero if needed
+r1 <- function(x) {
+  x %>% round(1) %>% format(nsmall = 1)
+}
+
+#Round to 2 decimals and include zero if needed
+r2 <- function(x) {
+  x %>% round(2) %>% format(nsmall = 2)
+}
+
+#Convert to million
+tomil <- function(x) {
+  format(round(x / 1e6, 1), nsmall = 1, trim = T)
+}
+
+#Perform some aesthetic modifications for flextables
+flextable_aes <- function(table, table_title) {
+  
+  #Table font
+  table <- flextable::font(table, fontname = "Times New Roman", part = "all")
+  
+  #Align everything centrally
+  table <- flextable::align(table, align = "center", part = "all")
+  
+  #Table heading
+  table <- flextable::set_caption(table, caption = table_title)
+  
+  #Align footer to the left
+  table <- flextable::align(table, align = "left", part = "footer")
+  
+  
+  #Set Table width
+  table <- flextable::width(table, width = 1.5, unit = "in")
+  
+  #Bold
+  table <- flextable::bold(table, part = "header")
+  
+  #Borders
+  table <- table %>% border_inner %>% border_outer
+  
+  #Print
+  table
+}
+
+
+```
+
+## Import
+
+```{r}
+
+#The lefthand side is the name of the folder in which the respective NHANES data files should be deposited. The lefthand side is the name that will be used for the data.frame in R
+folders_dfs <- list(
+  c("Demographics", "demo"),
+  c("LDL_TG_Measure", "ldl_tg_measure"),
+  c("TC_measure", "tc_measure"),
+  c("HDL_Measure", "hdl_measure"),
+  c("Glycohemoglobin", "hba1c"),
+  c("Fasting_Glucose", "fasting_glucose"),
+  c("BMI", "bmi"),
+  c("BP_Measure", "bp_measure"),
+  c("BP_Chol", "bp_chol"),
+  c("Diabetes", "dm_df"),
+  c("Smoke", "smoke_df"),
+  c("Urine albumin and creatinine", "urine_alb_cr"),
+  c("Medical Conditions", "med_conds"),
+  c("Biochem Profile", "biochem"),
+  c("Meds", "meds"),
+  c("Kidney", "kidney"),
+  c("ApoB", "apo_b"),
+  c("HIV", "hiv")
+)
+
+#Get NHANES directory (INSERT YOUR OWN DIRECTORY HERE)
+nhanes_dir <- "C:/Ahmed's Stuff/ResearchStuff/NHANES_Data/"
+
+#Lapply to import NHANES data for a given set of variables
+lapply(folders_dfs, function(folder) import_nhanes(folder)) -> data
+
+#Use Reduce to successively merge elements of the data list
+Reduce(function(x, y) {
+  # Drop any columns in y that already exist in x (except SEQN)
+  duplicate_cols <- setdiff(intersect(names(x), names(y)), "SEQN")
+  if (length(duplicate_cols) > 0) {
+    y <- y[, !names(y) %in% duplicate_cols, with = FALSE]
+  }
+  merge(x, y, all = TRUE, by = "SEQN")
+}, data) -> data
+
+##TABLE 1 FUNCTION
+table1_create <- function(dataset, variables, table1_title, 
+                          strata_var = NULL, 
+                          p_values = FALSE,
+                          p_values_col_ind = 5,
+                          table_width = 3,
+                          numeric_variables, binary_variables
+) {
+  
+  #Store variable names
+  var_names <- names(variables)
+  
+  
+  #Get overall CCs using the sum_var function
+  lapply(var_names, function(variable) sum_var(dataset, variable)) -> overall_values
+  
+  #Create strata CCs using the same but with an additional layer of looping for strata levels
+  if(!is.null(strata_var)) {
+    
+    #Strata levels  
+    strata_levels <- dataset[, get(strata_var) %>% factor %>% levels]
+    
+    #Apply over levels of strata of interest
+    lapply(1:length(strata_levels),
+           function(i)
+           {
+             stratum <- strata_levels[[i]]
+             #CCs of level 1
+             lapply(var_names, function(variable) sum_var(dataset = dataset[get(strata_var) == stratum], variable)) %>%
+               unlist
+           }
+    ) -> strata_values
+    
+    
+  }
+  
+  
+  #Create data.table containing the relevant variables
+  data.table(
+    variable_names = variables %>% unlist,
+    variable_values = overall_values %>% unlist
+  ) -> table1_df
+  
+  #Create new columns with the corresponding values for each strata
+  if(!is.null(strata_var)) {
+    for(i in 1:length(strata_values)) {
+      table1_df[, paste0("level_", i) := strata_values[[i]]]
+      setnames(table1_df, old = paste0("level_", i), new = strata_levels[i])
+    }
+  }
+  
+  #Get p-values if necessary
+  if(p_values) {
+    #Loop over variables to get test statistics
+    lapply(var_names, 
+           function(var_name) test_var(dataset, variable = var_name, strata_var)) %>% unlist -> pvals
+    table1_df[, p_values := pvals]
+  }
+  
+  #Rename and create a flextable
+  table1_df %>%
+    rename(any_of(c(
+      "Variables" = "variable_names",
+      "Overall" = "variable_values",
+      "P-values*" = "p_values"
+    ))) %>%
+    flextable %>% 
+    flextable_aes(table1_title) %>%
+    bold(j = 1) %>%
+    width(width = table_width) -> table_flex
+  
+  #Add P-value if relevant
+  if(p_values) {
+    table_flex <- footnote(table_flex, 
+             ref_symbols = footnote_symbol(1), 
+             j = p_values_col_ind,
+             value = as_paragraph("P-values were obtained from Wilcoxon test for continuous variables or from a Chi-square test for categorical variables."))
+  }
+  
+  #Produce table
+  table_flex
+}
+```
+
+## Modify LDL to MH
+
+```{r}
+#Create empty x column
+data[, mh_factor := NA]
+
+
+#Non-HDL
+data[, non_hdl := tc - hdl]
+
+#Convert stata code to R (to create the script necessary to create the Martin Hopkins factor)
+mh_factor_script <- readLines("statacode.do") %>%
+  str_replace("if", "data$mh_factor[") %>% #Replace if
+  {.[. != ""]} %>% #Remove empty lines
+  {.[c(-1, -length(.) )]} %>% #Remove first and last line
+  paste0("]") %>% #Put bracket at end of each line
+  str_replace_all("nonhdl", "data$non_hdl") %>% #Replace nonhdl by appropriate symbol
+  str_replace_all("tg", "data$tg") %>% #Replace tg by appropriate symbol
+  str_remove_all("replace|factor=") %>% #Remove replace and factor= 
+  paste("<-", word(., 2))  %>% #Relocate conversion factor where appropriate
+  str_remove(word(., 2)) %>% #Remove the number at the beginning
+  str_trim %>% #Remove unnecessary space at beginning
+  str_replace("\\[ ", "\\[") #Remove unnecccessary space after "["
+
+#Run script (which is now written in a format usable in R)
+eval(parse(text = mh_factor_script))
+
+#Get MH estimate
+data[, ldl := tc - (hdl + (tg/mh_factor))]
+data[ldl < 0, ldl := NA]
+data[, ldl_fw := tc - (hdl + (tg/5))]
+data[ldl_fw < 0, ldl_fw := NA]
+
+```
+
+## Clean & Prep
+
+```{r}
+
+#Convert variables coded as 1, 2, 7, or 9
+columns_1279 <- c("pre_dm", "dm_self_report", "htn", "smoke_100",
+                  "chd", "mi", "stroke", "angina", 
+                  "cancer", "htn_meds_adv", "htn_meds_take", "chol_meds_take",
+                  "failing_kidney", "dialysis", "hf", "hiv_combo_1516", "hiv_confirm_1516",  "hiv_1114"
+                  )
+data[, (columns_1279) := lapply(.SD, convert_1279, "yes", "no"), 
+     .SDcols = columns_1279]
+data[failing_kidney == "no", dialysis := "no"]
+#Convert hypertension meds to no if appropriate 
+data[survey_cycle != 12, htn_meds_take := fifelse(htn == "no" | htn_meds_adv == "no", "no", as.character(htn_meds_take)) %>% factor]
+data[survey_cycle == 12, htn_meds_take := fifelse(htn == "no" , "no", as.character(htn_meds_take)) %>% factor]
+
+
+#Convert sex
+data[, sex := fcase(
+    sex == 1, "male",
+    sex == 2, "female"
+)]
+
+#Convert hiv
+data[, hiv := fcase(
+  (hiv_combo_1516 == "yes" & is.na(hiv_confirm_1516)) | hiv_confirm_1516 == "yes" | hiv_1114 == "yes", "yes",
+  hiv_1114 == "no" | hiv_confirm_1516 == "no" | (hiv_combo_1516 == "yes" & hiv_confirm_1516 == "no"), "no"
+)]
+
+#Build a string for statins
+statin_string <- c("(?i)LOVASTATIN|PRAVASTATIN|FLUVASTATIN|ROSUVASTATIN|PITAVASTATIN|ATORVASTATIN|SIMVASTATIN|CERIVASTATIN")
+pcks9_string <- c("(?i)EVOLOCUMAB|ALIROCUMAB")
+eze_string <- c("(?i)EZETIMIBE")
+
+#Indicate drug use
+data[, statin := find_drug(drug_names, statin_string, "yes", "no")]
+data[, pcsk9 := find_drug(drug_names, pcks9_string, "yes", "no")]
+data[, ezetimibe := find_drug(drug_names, eze_string, "yes", "no")]
+data[, llt := fifelse(statin == "yes" | pcsk9 == "yes" | ezetimibe == "yes", "yes", "no")]
+#Since medication data were not collected in 2021-2023, we will use the self-reported variable
+data[survey_cycle == 12, statin := chol_meds_take]
+data[survey_cycle == 12, llt := chol_meds_take]
+
+#Convert race
+data[, race_pce := convert_race_pce(race)]
+data[, race := convert_race_complete(race)]
+data[, black := fifelse(race == "Non-Hispanic Black", "yes", "no")]
+data[, hispanic := fifelse(race == "Hispanic", "yes", "no")]
+data[, white := fifelse(race == "Non-Hispanic White", "yes", "no")]
+data[, asian := fifelse(race == "Non-Hispanic Asian", "yes", "no")]
+data[, other := fifelse(race == "Other (including multiracial)", "yes", "no")]
+
+#Convert current smoking habits
+data[, smoke_now := fcase(
+  smoke_now == 1, "yes",
+  smoke_now == 2, "yes",
+  smoke_now == 3, "no",
+  smoke_100 == "no", "no"
+)]
+
+#Create obesity
+data[, obesity := fifelse(bmi >= 30, "yes", "no")]
+
+#Calcualte avg systolic and diastolic BP
+#Create BP variables that take the mean of any number of measurements
+library(kit)
+data[, sbp := pmean(sbp_1, sbp_2, sbp_3, na.rm = T)]
+data[, dbp := pmean(dbp_1, dbp_2, dbp_3, na.rm = T)]
+
+
+#Define DM drug use use
+insulin_string <- c("INSULIN|LISPRO|ASPART|GLULISINE|NPH|GLARGINE|DETEMIR|DEGLUDEC")
+ddp4_string <- c("SITAGLIPTIN|LINAGLIPTIN|ALOGLIPTIN|SAXAGLIPTIN")
+meglitinides_string <- c("REPAGLINIDE|NATEGLINIDE")
+sulfonylureas_string <- c("GLIPIZIDE|GLIMEPIRIDE|GLYBURIDE|GLICLAZIDE|TOLBUTAMIDE|CARBUTAMIDE|TOLAZAMIDE|CHLORPROPAMIDE")
+tzds_string <- c("PIOGLITAZONE|ROSIGLITAZONE")
+insulin_string <- c("INSULIN|LISPRO|ASPART|GLULISINE|NPH|GLARGINE|DETEMIR|DEGLUDEC")
+amylin_string <- c("PRAMLINTIDE")
+
+data[, insulin := find_drug(drug_names, insulin_string, "Yes", "No")]
+data[, ddp4 := find_drug(drug_names, ddp4_string, "Yes", "No")]
+data[, tzds := find_drug(drug_names, tzds_string, "Yes", "No")]
+data[, sulfonylureas := find_drug(drug_names, sulfonylureas_string, "Yes", "No")]
+data[, meglitinides := find_drug(drug_names, meglitinides_string, "Yes", "No")]
+data[, insulin := find_drug(drug_names, insulin_string, "Yes", "No")]
+data[, amylin := find_drug(drug_names, amylin_string, "Yes", "No")]
+data[, dm_drug := fifelse(str_detect(paste0(insulin, ddp4, tzds, sulfonylureas, meglitinides, insulin, amylin), "Yes"), "Yes", "No")]
+
+
+#Define DM
+data[, dm := fcase(
+  hba1c >= 6.5 | fasting_glucose >= 126 | dm_self_report == "yes" | dm_drug == "Yes", "yes",
+  dm_self_report == "no" | hba1c < 6.5 | fasting_glucose < 126, "no"
+  )]
+
+#Define HTN
+data[, htn := fifelse(sbp >= 130 | dbp >= 80 | htn == "yes", "yes", "no")]
+
+#Calculate sex-specific constants for eGFR estimation
+data[, alpha := fifelse(sex == "male", -0.302, -0.241)]
+data[, k := fifelse(sex == "male", 0.9, 0.7)]
+data[, constant := fifelse(sex == "male", 1, 1.012)]
+
+#Calculate eGFR
+data[, egfr :=
+    142 *
+    (pmin(creatinine/k, 1)^alpha) *
+    (pmax(creatinine/k, 1)^-1.2) *
+    (0.9938^age) *
+    constant
+    ]
+
+#Create age cats for inverse probability matching
+data[, age_cats := cut(age, seq(0, 90, 10), include.lowest = T)]
+
+#Create albumin/creatinine ratio
+data[, uacr := urine_albumin/(10*urine_creatinine/1000)]
+
+#Estimate pre-treatment LDL/non-HDL
+data[, ldl_multiplier := 1]
+data[, non_hdl_multiplier := 1]
+
+##For statins
+#LDL (Per Marcusa 2020, Assuming a 45.2% reduction)
+data[statin == "yes", ldl_multiplier := ldl_multiplier / (1-0.452)]
+#Non-HDL (Per Mora 2012, assuming a 40.3% reduction)
+data[statin == "yes", non_hdl_multiplier := non_hdl_multiplier / (1-0.403)]
+
+##For PCSK9
+#LDL (Per Marcusa 2020, Assuming a 62.3% reduction)
+data[pcsk9 == "yes", ldl_multiplier := ldl_multiplier / (1-0.623)]
+#Non-HDL (Per Supplementary Figure S3 in the FOURIER trial, assuming a 51.6% reduction)
+data[pcsk9 == "yes", non_hdl_multiplier := non_hdl_multiplier / (1-0.516)]
+
+##For Ezetimibe
+#LDL (Per Marcusa 2020, Assuming a 25.8% reduction)
+data[ezetimibe == "yes", ldl_multiplier := ldl_multiplier / (1-0.258)]
+#Non-HDL (per Table S1 in the IMPROVE-IT trial, assuming a 19.9% reduction)
+data[ezetimibe == "yes", non_hdl_multiplier := non_hdl_multiplier / (1-0.199)]
+
+#LDL/non-HDL multipliers assuming a 30% discount
+data[, pre_ttt_ldl_disc :=  ldl * (1/(1 - (0.7*(1 - (1/ldl_multiplier)))))]
+data[, pre_ttt_non_hdl_disc := non_hdl * non_hdl_multiplier / (0.3 * non_hdl_multiplier + 0.7)]
+
+#Estimate pre-treatment cholesterol
+data[, pre_ttt_ldl := ldl * ldl_multiplier]
+data[, pre_ttt_non_ldl := non_hdl * non_hdl_multiplier]
+
+
+```
+
+## Impute mean values for eGFR
+
+```{r}
+#Create backup copy
+data[, egfr_o := copy(egfr)]
+
+
+data[(WTSAF2YR > 0) & !is.na(egfr_o),
+     wtd.mean(x = egfr_o, w = c(WTSAF2YR) %>% na.omit,
+                           na.rm = T)] -> mean_egfr_impute
+#Impute
+data[(WTSAF2YR > 0) & is.na(egfr_o), 
+     egfr := mean_egfr_impute]
+
+
+```
+
+## Calculate risk
+
+```{r}
+
+#Create capped versions of variables
+data[, tc_cap := fcase(
+  tc < 130, 130,
+  tc > 320, 320,
+  rep(TRUE, .N), tc
+)]
+data[, sbp_cap := fcase(
+  sbp < 90, 90,
+  sbp > 200, 200,
+  rep(TRUE, .N), sbp
+)]
+
+data[, hdl_cap_prevent := fcase(
+  hdl < 20, 20,
+  hdl > 100, 100,
+  rep(TRUE, .N), hdl
+)]
+
+data[, bmi_cap_prevent := fcase(
+  bmi < 18.5, 18.5,
+  bmi > 40, 40,
+  rep(TRUE, .N), bmi
+)]
+
+data[, egfr_cap_prevent := fcase(
+  egfr < 15, 15,
+  egfr > 140, 140,
+  rep(TRUE, .N), egfr
+)]
+
+data[, eligible := fifelse(
+  age >= 30 & age <= 79, 1, 0
+)]
+#Calculate 10-year risk using PREVENT
+data[eligible == 1, prevent_10yr := predict_10yr_ascvd_risk(
+  age_years = age,
+  sex = sex,
+  bp_sys_mmhg = sbp_cap,
+  bmi = bmi_cap_prevent,
+  diabetes = dm,
+  bp_meds = htn_meds_take,
+  chol_total_mgdl = tc_cap,
+  chol_hdl_mgdl = hdl_cap_prevent,
+  statin_meds = statin,
+  smoke_current = smoke_now,
+  egfr = egfr_cap_prevent,
+  equation = "Khan_2023"
+)]
+
+#Calculate 10-year risk using PREVENT
+data[eligible == 1, prevent_30yr := predict_30yr_ascvd_risk(
+  age_years = age,
+  sex = sex,
+  bp_sys_mmhg = sbp_cap,
+  bmi = bmi_cap_prevent,
+  diabetes = dm,
+  bp_meds = htn_meds_take,
+  chol_total_mgdl = tc_cap,
+  chol_hdl_mgdl = hdl_cap_prevent,
+  statin_meds = statin,
+  smoke_current = smoke_now,
+  egfr = egfr_cap_prevent,
+  equation = "Khan_2023"
+)]
+
+
+data[, statin_num := fifelse(statin == "yes", 1, 0)]
+data[, dm_num := fifelse(dm == "yes", 1, 0)]
+data[, smoke_num := fifelse(smoke_now == "yes", 1, 0)]
+data[, htn_meds_num := fifelse(htn_meds_take == "yes", 1, 0)]
+
+
+#Calculate 10-year risk using more expansive PREVENT
+# data[eligible == 1, prevent_10yr_more := predict_10yr_ascvd_risk(
+#   age_years = age,
+#   sex = sex,
+#   bp_sys_mmhg = sbp_cap,
+#   bmi = bmi_cap_prevent,
+#   diabetes = dm,
+#   hba1c = hba1c,
+#   acr = uacr,
+#   bp_meds = htn_meds_take,
+#   chol_total_mgdl = tc_cap,
+#   chol_hdl_mgdl = hdl_cap_prevent,
+#   statin_meds = statin,
+#   smoke_current = smoke_now,
+#   egfr = egfr_cap_prevent,
+#   sdi = NULL,
+#   equation = "Khan_2023",
+#   prevent_type = "base"
+# )]
+
+#Calculate 10-year risk using PCE
+data[age >= 40 & age <= 75, pce_10yr := predict_10yr_ascvd_risk(
+  age_years = age,
+  race = race_pce,
+  sex = sex,
+  bp_sys_mmhg = sbp_cap,
+  diabetes = dm,
+  bp_meds = htn_meds_take,
+  chol_total_mgdl = tc_cap,
+  chol_hdl_mgdl = hdl_cap_prevent,
+  smoke_current = smoke_now,
+  equation = "Goff_2013"
+)]
+
+data[, sdi := NA]
+
+
+#Calculate 10-year risk using the full PREVENT equation
+data[age >= 30, prevent_10yr_uacr_a1c := predict_10yr_ascvd_risk(
+  age_years = age,
+  sex = sex,
+  bp_sys_mmhg = sbp_cap,
+  bmi = bmi_cap_prevent,
+  diabetes = dm,
+  bp_meds = htn_meds_take,
+  chol_total_mgdl = tc_cap,
+  chol_hdl_mgdl = hdl_cap_prevent,
+  statin_meds = statin,
+  smoke_current = smoke_now,
+  egfr = egfr_cap_prevent,
+  hba1c = hba1c,
+  acr = uacr,
+  sdi = sdi,
+  equation = "Khan_2023",
+  prevent_type = "full"
+)]
+
+data[age >= 30, prevent_30yr_uacr_a1c := predict_30yr_ascvd_risk(
+  age_years = age,
+  sex = sex,
+  bp_sys_mmhg = sbp_cap,
+  bmi = bmi_cap_prevent,
+  diabetes = dm,
+  bp_meds = htn_meds_take,
+  chol_total_mgdl = tc_cap,
+  chol_hdl_mgdl = hdl_cap_prevent,
+  statin_meds = statin,
+  smoke_current = smoke_now,
+  egfr = egfr_cap_prevent,
+  hba1c = hba1c,
+  acr = uacr,
+  sdi = sdi,
+  equation = "Khan_2023",
+  prevent_type = "full"
+)]
+
+#Define CVD
+data[, ascvd := fifelse(mi == "yes" | stroke == "yes" | chd == "yes" | angina == "yes", 1, 0) %>% convert_10]
+#Define CKD
+data[, ckd := fifelse(uacr >= 30 | egfr <= 60, 1, 0) %>% convert_10]
+
+#MetS (per Table 1 in https://www.ahajournals.org/doi/10.1161/cir.0000000000001184)
+data[, met_syndrome := fifelse(
+  rowSums(cbind(
+    tg >= 150,
+    sbp >= 130 | dbp >= 80 | htn_meds_take == "yes",
+    hdl < 40 & sex == "male",
+    hdl < 50 & sex == "female",
+    waist > 102 & sex == "male",
+    waist > 88 & sex == "female",
+    fasting_glucose >= 100
+  ), na.rm = TRUE) >= 3,
+  1,
+  0
+)]
+
+#2018 Risk factors (per Table 6 in the 2018 guidelines)
+data[, rf_enhancers_2018 := fifelse(rowSums(cbind(ldl %between% c(160, 189.999),
+                            non_hdl %between% c(190, 219),
+                          egfr %between% c(15, 59),
+                               apo_b >= 130,
+                            met_syndrome == 1), na.rm = T) >= 1,
+                          1, 0
+                          )]
+
+#CKM definition (per Table 1 in https://www.ahajournals.org/doi/10.1161/cir.0000000000001184)
+data[, ckm := fifelse(rowSums(cbind(ckd == "yes" | met_syndrome == 1 | sbp >= 130 | dbp >= 80 | dm == "yes" | tg >= 135), na.rm = T) >= 1, 1, 0)]
+
+#RFs in 2026 (per Table 13 in 2026 guidelines)
+data[, rf_enhancers_2026 := fifelse(rowSums(cbind(ldl %between% c(160, 189.999), 
+                                            (non_hdl %between% c(190, 219)),
+                                               apo_b >= 120,
+                                               tg >= 150,
+                                            ckd == "yes",
+                                            ckm == 1 ),
+                                            na.rm = T) >= 1,
+                                    1, 0)]
+#Minus LDL/non-HDL criteria for those with LDL>190
+data[, rf_enhancers_2026_minus_lipids := fifelse(rowSums(cbind(
+                                               apo_b >= 120,
+                                               tg >= 150,
+                                            ckd == "yes",
+                                            tg >= 135,
+                                            ckm == 1 ),
+                                            na.rm = T) >= 1,
+                                    1, 0)]
+
+#Minus LDL/non-HDL criteria for DM
+data[, rf_enhancers_2026_minus_ckm := fifelse(rowSums(cbind(ldl %between% c(160, 189.999), 
+                                            (non_hdl %between% c(190, 219)),
+                                               apo_b >= 120,
+                                               tg >= 150,
+                                            ckd == "yes",
+                                            tg >= 135),
+                                            na.rm = T) >= 1,
+                                    1, 0)]
+
+#N Lacking 10-year risk estimates
+lacking_risk_n <- data[(is.na(pce_10yr) | is.na(prevent_10yr)), .N]
+
+```
+
+## Assign CoR
+
+### Common
+
+```{r}
+
+
+##1 by BOTH guidelines
+# LDL >190
+data[, v_high_ldl_eligible_2026 := fifelse(pre_ttt_ldl >= 190, 1, 0)]
+data[, v_high_ldl_eligible_2018 := fifelse(pre_ttt_ldl >= 190 & age %between% c(20, 75), 1, 0)]
+
+#DM with age 40-75
+data[, dm_eligible := fifelse(dm == "yes" & age %between% c(40, 75), 1, 0)]
+#ASCVD
+data[, ascvd_eligible := fifelse(ascvd == "yes", 1, 0)]
+
+```
+
+
+### 2026/Base PREVENT
+
+```{r}
+###By 2026 ONLY
+##1
+##PREVENT-based 
+#Base
+data[, prevent_high_intermediate_eligible := fifelse(prevent_10yr %between% c(0.05, 0.1), 1, 0)]
+data[, prevent_high_eligible := fifelse(prevent_10yr >= 0.1, 1, 0)]
+
+
+
+#CKD stage III (without dialysis)
+data[, ckd_eligible := fifelse(egfr < 60 & dialysis == "no" & ldl %between% c(70, 189) & age %between% c(40, 75), 1, 0)]
+
+##2A
+data[, prevent_low_intermediate_eligible := fifelse(prevent_10yr %between% c(0.03, 0.0499999), 1, 0)]
+data[age < 30 | age >= 80, prevent_low_intermediate_eligible := 0] #0 if outside PREVENT-usable age-range
+
+
+data[, prevent_low_eligible := fifelse(prevent_10yr <= 0.03 &
+                                         (ldl %between% c(160, 189) | prevent_30yr >= 0.1),
+                                       1, 0)]
+data[!age %between% c(30, 59), prevent_low_eligible := 0] #0 if outside eligible age range
+data[, new_2a_ldl30 := prevent_low_eligible %>% convert_10]
+data[, new_2a := fifelse(prevent_low_intermediate_eligible == 1 | new_2a_ldl30 == "yes", 1, 0) %>% convert_10]
+
+
+#2A
+data[, new_2a_ldl30 := fifelse(
+  prevent_10yr < 0.03 & age %between% c(30, 59) &
+  (ldl %between% c(160, 189) | (prevent_30yr >= 0.1) ) &
+    ascvd == "no" & (dm == "no" | age < 40 | age > 75) & egfr >= 60
+    ,
+  "yes", "no")]
+
+#Recs by class
+data[, new_1 := pmax(v_high_ldl_eligible_2026,
+                      dm_eligible,
+                      ascvd_eligible,
+                      ckd_eligible,
+                      prevent_high_eligible,
+                      prevent_high_intermediate_eligible,
+                      na.rm = T) %>% convert_10]
+data[, new_2a_not_1 := fifelse(new_2a == "yes" & new_1 == "no", "yes", "no") %>% factor]
+
+
+data[, new_12a := pmax(v_high_ldl_eligible_2026,
+                      dm_eligible,
+                      ascvd_eligible,
+                      ckd_eligible,
+                      prevent_high_eligible,
+                      prevent_high_intermediate_eligible,
+                      prevent_low_intermediate_eligible,
+                      prevent_low_eligible,
+                      na.rm = T) %>% convert_10]
+
+
+
+data[, new_1_reason := fcase(ascvd_eligible == 1, "ASCVD",
+                             v_high_ldl_eligible_2026 == 1, "LDL-C greater than 190 mg/dL",
+                             dm_eligible == 1, "Diabetes mellitus (aged 40 to 75 years)",
+                             ckd_eligible == 1, "Stage III CKD not on dialysis",
+                             prevent_high_eligible == 1 | prevent_high_intermediate_eligible == 1, "PREVENT-based ASCVD 10-year risk of 5% or more")]
+
+```
+
+### Full PREVENT
+
+```{r}
+
+#UACR and A1c
+data[, prevent_uacr_a1c_high_intermediate_eligible := fifelse(prevent_10yr_uacr_a1c %between% c(0.05, 0.1), 1, 0)]
+data[, prevent_uacr_a1c_high_eligible := fifelse(prevent_10yr_uacr_a1c >= 0.1, 1, 0)]
+
+#2A Full PREVENT with UACR and A1c
+data[, prevent_uacr_a1c_low_intermediate_eligible := fifelse(prevent_10yr_uacr_a1c %between% c(0.03, 0.0499999), 1, 0)]
+data[age < 30 | age >= 80, prevent_uacr_a1c_low_intermediate_eligible := 0] #0 if outside PREVENT-usable age-range
+data[, prevent_uacr_a1c_low_eligible := fifelse(prevent_10yr_uacr_a1c <= 0.03 &
+                                         (ldl %between% c(160, 189) | prevent_30yr_uacr_a1c >= 0.1),
+                                       1, 0)]
+data[!age %between% c(30, 59), prevent_uacr_a1c_low_eligible := 0] #0 if outside eligible age range
+data[, new_2a_ldl30_uacr_a1c := prevent_uacr_a1c_low_eligible %>% convert_10]
+data[, new_2a_uacr_a1c := fifelse(prevent_uacr_a1c_low_intermediate_eligible == 1 | new_2a_ldl30_uacr_a1c == "yes", 1, 0) %>% convert_10]
+
+
+
+data[, new_2a_ldl30_uacr_a1c := fifelse(
+  prevent_10yr_uacr_a1c < 0.03 & age %between% c(30, 59) &
+  (ldl %between% c(160, 189) | (prevent_30yr_uacr_a1c >= 0.1) ) &
+    ascvd == "no" & (dm == "no" | age < 40 | age > 75) & egfr >= 60
+    ,
+  "yes", "no")]
+
+data[, new_12a_uacr_a1c := pmax(v_high_ldl_eligible_2026,
+                      dm_eligible,
+                      ascvd_eligible,
+                      ckd_eligible,
+                      prevent_uacr_a1c_high_eligible,
+                      prevent_uacr_a1c_high_intermediate_eligible,
+                      prevent_low_intermediate_eligible,
+                      prevent_low_eligible,
+                      na.rm = T) %>% convert_10]
+
+
+data[, new_1_uacr_a1c := pmax(v_high_ldl_eligible_2026,
+                      dm_eligible,
+                      ascvd_eligible,
+                      ckd_eligible,
+                      prevent_uacr_a1c_high_eligible,
+                      prevent_uacr_a1c_high_intermediate_eligible,
+                      na.rm = T) %>% convert_10]
+
+
+```
+
+
+## Goals
+
+```{r}
+
+#Define v high risk ASCVD
+data[, vh_risk_ascvd := fifelse(ascvd == "yes" & 
+                                  ((mi == "yes" & stroke == "yes") |
+                                  age >= 65 | smoke_now == "yes" | dm == "yes" | hf == "yes" | htn == "yes" | 
+                                    (ldl > 100 & statin == "yes" & ezetimibe == "yes")),
+                                "yes", "no"
+                                  )]
+
+#Define goals
+data[, goal_100_130 := fifelse(new_1 == "yes" & 
+                                 (prevent_10yr < 0.1 |
+                                    pre_ttt_ldl >= 190 |
+                                    dm == "yes" 
+                                    ),
+                               1, 0
+                                 )]
+
+data[, goal_70_100 := fifelse(new_1 == "yes" & 
+                                 (prevent_10yr >= 0.1 |
+                                    (pre_ttt_ldl >= 190 & rf_enhancers_2026_minus_lipids == 1) |
+                                    (dm == "yes" & rf_enhancers_2026_minus_ckm == 1) |
+                                    (ascvd == "yes" & vh_risk_ascvd == "no")
+                                 ),
+                               1, 0
+)]
+
+data[, goal_55_85 := fifelse(new_1 == "yes" & 
+                                (( (pre_ttt_ldl >= 190 | tg >= 150 | vh_risk_ascvd == "yes")  & ascvd == "yes")
+                                ),
+                              1, 0
+)]
+
+#Give goal
+data[, goal := fcase(
+  goal_55_85 == 1, "LDL-C/non-HDL-C targets of <55/<85 mg/dL",
+  goal_70_100 == 1, "LDL-C/non-HDL-C targets of <70/<100 mg/dL",
+  goal_100_130 == 1, "LDL-C/non-HDL-C targets of <100/<130 mg/dL"
+) %>% factor]
+
+
+#ApoB goals
+data[, apo_b_goal := fcase(
+  goal_55_85 == 1, "ApoB target of <55 mg/dL",
+  goal_70_100 == 1, "ApoB target of <70 mg/dL",
+  goal_100_130 == 1, "ApoB target of <90 mg/dL",
+  default = NA_character_
+) %>% factor]
+
+
+#LDL cats
+data[, ldl_cat := fcase(
+  ldl < 55, "LDL-C <55 mg/dL",
+  ldl %between% c(55, 69.999999), "LDL-C 55-69 mg/dL",
+  ldl %between% c(70, 99.99999999), "LDL-C 70-99 mg/dL",
+  ldl >= 100, "LDL-C of 100 mg/dL or greater"
+) %>% factor]
+
+#Goal needs based on LDL and non-HDL
+data[, goal_need := fcase(
+  goal_55_85 == 1 & (ldl >= 55 | non_hdl >= 85), "Requires intensification to meet LDL-C/non-HDL-C targets of <55/<85 mg/dL",
+  goal_70_100 == 1 & (ldl >= 70 | non_hdl >= 100), "Requires intensification to meet LDL-C/non-HDL-C targets of <70/<100 mg/dL",
+  goal_100_130 == 1 & (ldl >= 100 | non_hdl >= 130), "Requires intensification to meet LDL-C/non-HDL-C targets of <100/<130 mg/dL",
+  (goal_55_85 == 1 & (ldl < 55 | non_hdl < 85)) | (goal_70_100 == 1 & (ldl < 70 | non_hdl < 100)) | (goal_100_130 == 1 & (ldl < 100 | non_hdl < 130)),
+  "At goal"
+  ) %>% factor]
+
+
+#Goal needs based on LDL only
+data[, goal_need_ldl := fcase(
+  goal_55_85 == 1 & (ldl >= 55), "Requires intensification to meet LDL-C target of <55 mg/dL",
+  goal_70_100 == 1 & (ldl >= 70), "Requires intensification to meet LDL-C target of <70 mg/dL",
+  goal_100_130 == 1 & (ldl >= 100), "Requires intensification to meet LDL-C target of <100 mg/dL",
+  (goal_55_85 == 1 & (ldl < 55)) | (goal_70_100 == 1 & (ldl < 70)) | (goal_100_130 == 1 & (ldl < 100)),
+  "At goal"
+  ) %>% factor]
+
+data[, goal_need_ldl_fw := fcase(
+  goal_55_85 == 1 & (ldl_fw >= 55), "Requires intensification to meet LDL-C target of <55 mg/dL",
+  goal_70_100 == 1 & (ldl_fw >= 70), "Requires intensification to meet LDL-C target of <70 mg/dL",
+  goal_100_130 == 1 & (ldl_fw >= 100), "Requires intensification to meet LDL-C target of <100 mg/dL",
+  (goal_55_85 == 1 & (ldl_fw < 55)) | (goal_70_100 == 1 & (ldl_fw < 70)) | (goal_100_130 == 1 & (ldl_fw < 100)),
+  "At goal"
+  ) %>% factor]
+
+#Goal needs based on non-HDL-only
+data[, goal_need_non_hdl := fcase(
+  goal_55_85 == 1 & (non_hdl >= 85), "Requires intensification to meet non-HDL-C target of <85 mg/dL",
+  goal_70_100 == 1 & (non_hdl >= 100), "Requires intensification to meet non-HDL-C target of <100 mg/dL",
+  goal_100_130 == 1 & (non_hdl >= 130), "Requires intensification to meet non-HDL-C target of <130 mg/dL",
+  (goal_55_85 == 1 & (non_hdl < 85)) | (goal_70_100 == 1 & (non_hdl < 100)) | (goal_100_130 == 1 & (non_hdl < 130)),
+  "At goal"
+  ) %>% factor]
+
+#Meets LDL but not non-HDL
+data[, goal_need_non_hdl_not_ldl := fcase(
+  goal_55_85 == 1 & ldl < 55 & non_hdl >= 85, "Requires intensification to meet non-HDL-C target of <85 mg/dL",
+  goal_70_100 == 1 & ldl < 70 & (non_hdl >= 100), "Requires intensification to meet non-HDL-C target of <100 mg/dL",
+  goal_100_130 == 1 & ldl < 100 & (non_hdl >= 130), "Requires intensification to meet non-HDL-C target of <130 mg/dL",
+  default = "Concordant"
+)]
+
+
+
+#Goal needs according to LDL and non-HDL (3 cats)
+data[, goal_need_ldl_non_hdl := fcase(
+  goal_need_ldl != "At goal", "Does not meet LDL-C goal",
+  goal_need_ldl == "At goal" & goal_need_non_hdl != "At goal", "Meets LDL-C but not non-HDL-C goal",
+  goal_need_ldl == "At goal" & goal_need_non_hdl == "At goal", "Meets both LDL-C and non-HDL-C goal"
+) %>% factor]
+
+#ApoB goal attainment
+data[, goal_need_apo_b := fcase(
+  apo_b_goal == "ApoB target of <90 mg/dL" & apo_b >= 90, "Requires intensifcation to meet apoB target of <90 mg/dL",
+  apo_b_goal == "ApoB target of <70 mg/dL" & apo_b >= 70, "Requires intensifcation to meet apoB target of <70 mg/dL",
+  apo_b_goal == "ApoB target of <55 mg/dL" & apo_b >= 55, "Requires intensifcation to meet apoB target of <55 mg/dL",
+  default = "At goal"
+  
+)]
+
+#Goal needs according to LDL and apoB
+data[, goal_need_ldl_apo_b := fcase(
+  goal_need_ldl != "At goal", "Does not meet LDL-C goal",
+  goal_need_ldl == "At goal" & goal_need_apo_b != "At goal", "Meets LDL-C but not apoB goal",
+  goal_need_ldl == "At goal" & goal_need_apo_b == "At goal", "Meets both LDL-C and apoB goal"
+) %>% factor]
+
+#Goal needs according to LDL, non-HDL, and apoB
+data[, goal_need_3 := fcase(
+  goal_need_ldl != "At goal", "Does not meet LDL-C goal",
+  goal_need_ldl == "At goal" & goal_need_non_hdl != "At goal", "Meets LDL-C but not non-HDL-C goal",
+  goal_need_ldl == "At goal" & goal_need_non_hdl == "At goal" & goal_need_apo_b != "At goal", "Meets LDL-C and non-HDL-C but not apoB goal",
+  goal_need_ldl == "At goal" & goal_need_non_hdl == "At goal" & goal_need_apo_b == "At goal", "Meets LDL-C, non-HDL-C, and apoB goals"
+)]
+
+data[, goal_need_3_fw := fcase(
+  goal_need_ldl_fw != "At goal", "Does not meet LDL-C goal",
+  goal_need_ldl_fw == "At goal" & goal_need_non_hdl != "At goal", "Meets LDL-C but not non-HDL-C goal",
+  goal_need_ldl_fw == "At goal" & goal_need_non_hdl == "At goal" & goal_need_apo_b != "At goal", "Meets LDL-C and non-HDL-C but not apoB goal",
+  goal_need_ldl_fw == "At goal" & goal_need_non_hdl == "At goal" & goal_need_apo_b == "At goal", "Meets LDL-C, non-HDL-C, and apoB goals"
+)]
+
+```
+
+##Inclusion criteria
+
+```{r}
+incl_criteria <- expression( age >= 20 & llt == "yes" & new_1 == "yes" &
+                        !is.na(goal_need_3) &
+                        (ascvd == "yes" | tg>= 150 | dm == "yes" | ckm == 1))
+
+```
+
+
+## Create weights for treatment goal (apoB; only until 2016)
+
+```{r}
+#Obtain survey weights divided by N of cycles
+data[, pre_adj_weight := WTSAF2YR * 2/data[, uniqueN(survey_cycle)*2]] 
+
+#Propensity model for ppl with treatment goals that can be determined based on the unedrlying data and who fit the inclusion criteria
+glm(data = data[pre_adj_weight > 0 & eval(incl_criteria)], 
+    weight = pre_adj_weight/mean(pre_adj_weight),
+    family = "binomial", 
+    !is.na(goal_need_3) & !is.na(goal_need_3_fw) ~ rcs(age, 3) * sex * race) -> mprop
+
+#Invert predicted probability of response
+data[pre_adj_weight > 0, 
+     inv_probs := 1/predict(mprop, .SD, type = "response")]
+
+#Create new adjusted weights for ppl with apoB
+data[(!is.na(goal_need_3) & !is.na(goal_need_3_fw)) & eval(incl_criteria), weight := inv_probs * pre_adj_weight]
+
+data[, weight := weight * (data[eval(incl_criteria),
+                                          sum(pre_adj_weight, na.rm = T)/sum(data$weight, na.rm = T)])] #Renormalize to equalize to target population
+
+#Set weights to 0 if applicable
+data[is.na(weight), weight := 0]
+
+
+
+```
+
+##Distance to goal variables
+
+```{r}
+data[, ldl_goal := fcase(
+  goal_55_85 == 1, 55,
+  goal_70_100 == 1, 70,
+  goal_100_130 == 1, 100
+)]
+data[, ldl_dist := ldl - ldl_goal]
+data[, ldl_fw_dist := ldl_fw - ldl_goal]
+data[, ldl_rel_dist := ldl_dist/ldl]
+data[, ldl_rel_dist := ldl/ldl_goal]
+
+data[, non_hdl_goal := fcase(
+  goal_55_85 == 1, 85,
+  goal_70_100 == 1, 100,
+  goal_100_130 == 1, 130
+)]
+data[, non_hdl_dist := non_hdl - non_hdl_goal]
+data[, non_hdl_rel_dist := non_hdl_dist/non_hdl]
+data[, non_hdl_rel_dist := non_hdl/non_hdl_goal]
+
+
+data[, apo_b_goal := fcase(
+  apo_b_goal == "ApoB target of <90 mg/dL", 90,
+  apo_b_goal == "ApoB target of <70 mg/dL", 70,
+  apo_b_goal == "ApoB target of <55 mg/dL", 55
+)]
+data[, apo_b_dist := apo_b - apo_b_goal]
+data[, apo_b_rel_dist := apo_b_dist/apo_b]
+data[, apo_b_rel_dist := apo_b/apo_b_goal]
+
+
+```
+
+
+
+## Convert to a survey object
+
+```{r}
+
+#Use ApoB weights to create survey object
+sdata <- svydesign(data = data,
+                       ids = data$SDMVPSU,
+                       strata = data$SDMVSTRA,
+                       weights = data$weight,
+                       nest = TRUE)
+sdata <- subset(sdata, !is.na(goal_need_3) & !is.na(goal_need_3_fw) & eval(incl_criteria) #Groups specifically highlighted by the guidelines.
+                      )
+sdata$variables[, weight := weights(sdata)]
+
+```
+
+# Analyze
+
+##Baseline CCs table
+
+```{r}
+
+abbs_line <- "ACC: American College of Cardiology; AHA: American Heart Association; ASCVD: Atherosclerotic Cardiovascular disease; CKD: Chronic kidney disease; NH: Non-Hispanic"
+explanation_line <- "Chronic kidney disease was defined by an eGFR <60 mL/min/1.73 m² or a urine albumin-creatinine ratio ≥30mg/g. Obesity was defined by a body mass index ≥30kg/m². Diabetes was defined by an HbA1c ≥6.5%, fasting glucose ≥126mg/dL, a self-reported history of diabetes, or use of medications specific to diabetes. ASCVD was defined by a self-reported history of myocardial infarction, coronary heart disease, angina, or stroke"
+
+
+#Wtd-media-iqr function
+wtd_median_iqr <- function(var, wt, rounding = 0) {
+  paste0(round(wtd.quantile(var, weights = wt, na.rm = T)[3], rounding) %>% format(nsmall = rounding),
+         " (", round(wtd.quantile(var, weights = wt, na.rm = T)[2], rounding) %>% format(nsmall = rounding),
+         " to ",
+         round(wtd.quantile(var, weights = wt, na.rm = T)[4], rounding) %>% format(nsmall = rounding),
+         ")")
+}
+
+library(Hmisc)
+list(c("Number of survey respondents (N)", sdata$variables[weight > 0, .N %>% comma]),
+     c("Number of US adults (N, in millions)", sdata$variables[, sum(weight) %>% tomil]),
+     c("Age (years)", sdata$variables[, wtd_median_iqr(age, weight)]),
+     c("Proportion of women (%)", sdata$variables[, sum(weight[sex == "female"]/sum(weight))] %>% {r1(.*100)}),
+     c("Race/Ethnicity (%)", ""),
+     c("   Non-Hispanic White", sdata$variables[, sum(weight[race == "Non-Hispanic White"]/sum(weight))] %>% {r1(.*100)}),
+     c("   Non-Hispanic Black", sdata$variables[, sum(weight[race == "Non-Hispanic Black"]/sum(weight))] %>% {r1(.*100)}),
+     c("   Hispanic", sdata$variables[, sum(weight[race == "Hispanic"]/sum(weight))] %>% {r1(.*100)}),
+     c("   Non-Hispanic Asian", sdata$variables[, sum(weight[race == "Non-Hispanic Asian"]/sum(weight))] %>% {r1(.*100)}),
+     c("   Other (including multiracial)", sdata$variables[, sum(weight[race == "Other (including multiracial)"]/sum(weight))] %>% {r1(.*100)}),
+     c("Body mass index (kg/m2)", sdata$variables[!is.na(bmi), wtd_median_iqr(bmi, weight, 1)]),
+     c("Systolic Blood pressure (mmHg)", sdata$variables[!is.na(sbp), wtd_median_iqr(sbp, weight, 0)]),
+     c("Diastolic Blood pressure (mmHg)", sdata$variables[!is.na(dbp), wtd_median_iqr(dbp, weight, 0)]),
+     c("HbA1c (%)", sdata$variables[!is.na(hba1c), wtd_median_iqr(hba1c, weight, 1)]),
+     c("Low-density lipoprotein cholesterol (mg/dL)", sdata$variables[!is.na(ldl), wtd_median_iqr(ldl, weight, 0)]),
+     c("Total cholesterol (mg/dL)", sdata$variables[!is.na(tc), wtd_median_iqr(tc, weight, 0)]),
+     c("High-density lipoprotein cholesterol (mg/dL)", sdata$variables[!is.na(hdl), wtd_median_iqr(hdl, weight, 0)]),
+     c("Non-High-density lipoprotein cholesterol (mg/dL)", sdata$variables[!is.na(hdl) & !is.na(tc), wtd_median_iqr(tc - hdl, weight, 0)]),
+     c("Triglycerides (mg/dL)", sdata$variables[!is.na(ldl), wtd_median_iqr(tg, weight, 0)]),
+     c("Cardiovascular risk factors (%)", ""),
+     c("   Obesity", sdata$variables[!is.na(bmi), sum(weight[bmi >= 30]/sum(weight))] %>% {r1(.*100)}),
+     c("   Diabetes", sdata$variables[!is.na(dm), sum(weight[dm == "yes"]/sum(weight))] %>% {r1(.*100)}),
+     c("   Hypertension", sdata$variables[!is.na(htn), sum(weight[htn == "yes" | sbp >= 130 | dbp >= 80]/sum(weight))] %>% {r1(.*100)}),
+     c("   CKD", sdata$variables[!is.na(ckd), sum(weight[ckd == "yes"]/sum(weight))] %>% {r1(.*100)}),
+     c("   eGFR ≤59 ml/min/1.73m^2^", sdata$variables[!is.na(egfr), sum(weight[egfr <= 59]/sum(weight))] %>% {r1(.*100)}),
+     c("   UACR ≥30 mg/g", sdata$variables[!is.na(uacr), sum(weight[uacr >= 30]/sum(weight))] %>% {r1(.*100)}),
+     c("   LDL-C ≥190 mg/dL", sdata$variables[!is.na(ckd), sum(weight[ckd == "yes"]/sum(weight))] %>% {r1(.*100)}),
+     c("   Smoking", sdata$variables[!is.na(smoke_now), sum(weight[smoke_now == "yes"]/sum(weight))] %>% {r1(.*100)})
+) %>%
+  {tibble(
+    `Variable` = lapply(., "[[", 1) %>% unlist,
+    `Value` = lapply(., "[[", 2) %>% unlist
+  )} -> baseline_table
+
+flextable(baseline_table) %>%
+  border_inner %>%
+  border_outer %>%
+  merge_h %>%
+  bold(i = 1, part = "header") %>%
+  bold(j = 1) %>%
+  flextable::font(fontname = "Times New Roman") %>%
+  add_footer_row(values = as_paragraph("LDL-C: Low-density lipoprotein cholesterol; eGFR: Estimated glomerular filtration rate; UACR: Urine albumin-to-creatinine ratio"), colwidths = 2) %>%
+  add_footer_row(values = as_paragraph("Data for binary variables are displayed as percentages. Data for continuous variables are shown as medians and interquartile ranges."), colwidths = 2) %>%
+  add_footer_row(values = as_paragraph(explanation_line), colwidths = 2) %>%
+  border_inner %>% border_outer %>%
+  set_caption("Supplementary Table 5. Baseline characteristics of survey respondents (N = ", sdata$variables[, .N] %>% comma, ")") %>%
+  
+  width(width = 3.5) -> baseline_table_t
+save_as_docx(baseline_table_t, path = "Tables/Supplementary Table 5.docx")
+
+
+
+```
+
+##Missing data characterization
+
+```{r}
+#Tabulate missing data %
+list(
+  c("Age", 
+    data[age >= 20& !is.na(pre_adj_weight), 
+         r1(100*sum(pre_adj_weight[is.na(age)]/sum(pre_adj_weight)))]
+  ),
+  c("Sex", 
+    data[age >= 20 & !is.na(pre_adj_weight), 
+         r1(100*sum(pre_adj_weight[is.na(sex)]/sum(pre_adj_weight)))]
+  ),
+  c("Systolic blood pressure measurement", 
+    data[age >= 20 & !is.na(pre_adj_weight), 
+         r1(100*sum(pre_adj_weight[is.na(sbp)]/sum(pre_adj_weight)))]
+  ),
+  c("Diastolic blood pressure measurement", 
+    data[age >= 20 & !is.na(pre_adj_weight), 
+         r1(100*sum(pre_adj_weight[is.na(dbp)]/sum(pre_adj_weight)))]
+  ),
+  c("Body mass index", 
+    data[age >= 20 & !is.na(pre_adj_weight), 
+         r1(100*sum(pre_adj_weight[is.na(bmi)]/sum(pre_adj_weight)))]
+  ),
+  c("Diabetes", 
+    data[age >= 20 & !is.na(pre_adj_weight), 
+         r1(100*sum(pre_adj_weight[is.na(dm)]/sum(pre_adj_weight)))]
+  ),
+  c("Smoking", 
+    data[age >= 20 & !is.na(pre_adj_weight), 
+         r1(100*sum(pre_adj_weight[is.na(smoke_now)]/sum(pre_adj_weight)))]
+  ),
+  c("ASCVD", 
+    data[age >= 20 & !is.na(pre_adj_weight), 
+         r1(100*sum(pre_adj_weight[is.na(ascvd)]/sum(pre_adj_weight)))]
+  ),
+  c("HbA1c", 
+    data[age >= 20 & !is.na(pre_adj_weight), 
+         r1(100*sum(pre_adj_weight[is.na(hba1c)]/sum(pre_adj_weight)))]
+  ),
+  c("Total cholesterol", 
+    data[age >= 20 & !is.na(pre_adj_weight), 
+         r1(100*sum(pre_adj_weight[is.na(tc)]/sum(pre_adj_weight)))]
+  ),
+  c("High-density lipoprotein cholesterol", 
+    data[age >= 20 & !is.na(pre_adj_weight), 
+         r1(100*sum(pre_adj_weight[is.na(hdl)]/sum(pre_adj_weight)))]
+  ),
+  c("Creatinine**", 
+    data[age >= 20  & !is.na(pre_adj_weight), 
+         r1(100*sum(pre_adj_weight[is.na(creatinine)]/sum(pre_adj_weight)))]
+  ),
+  c("Urine albumin-creatinine ratio", 
+    data[age >= 20 & !is.na(pre_adj_weight), 
+         r1(100*sum(pre_adj_weight[is.na(uacr)]/sum(pre_adj_weight)))]
+  ),
+  c("PREVENT ASCVD risk*", 
+    data[age >= 20 & age %between% c(30, 79) & ascvd == "no" & ckd == "no" & egfr >= 60 & ldl < 190 & !is.na(pre_adj_weight), 
+         r1(100*sum(pre_adj_weight[is.na(prevent_10yr)]/sum(pre_adj_weight)))]
+  ),
+  c("PCE risk*", 
+    data[age >= 20 & age %between% c(40, 75) & ascvd == "no" & ckd == "no" & ldl < 190 & !is.na(pre_adj_weight), 
+         r1(100*sum(pre_adj_weight[is.na(prevent_10yr)]/sum(pre_adj_weight)))]
+  )
+) %>%
+  unlist %>%
+  matrix(.,
+         ncol = 2,
+         byrow = T) %>%
+  data.table -> missing_df
+setnames(missing_df, new = c("Variable", "Weighted % missing"))
+
+#Save as a word doc
+missing_df %>% 
+               flextable %>%
+               border_inner %>%
+               border_outer %>%
+               merge_h %>%
+               bold(i = 1, part = "header") %>%
+               bold(j = 1) %>%
+               set_caption(caption = as_paragraph("Supplementary Table 4. Weighted proportions of missing data among respondents.")) %>%
+               flextable::font(fontname = "Times New Roman") %>%
+               fontsize(size = 11) %>%
+               add_footer_row(colwidths = 2, 
+                              values = as_paragraph("*Estimated glomerular filtration rate in patients with a missing creatinine was imputed based on the weighted average of the study sample.\n**These proportions exclude participants who were not eligible for risk calculation because they were outside the validated range of either calculator and those with independent class I treatment recommendations.")) %>%
+  width(width = c(4, 2.5)) -> missing_data_t
+               
+save_as_docx(missing_data_t, path = "Tables/Supplementary Table 4.docx")
+
+
+```
+
+
+
+
+###Tabulate LDL/non-HDL eligibility
+
+```{r}
+
+
+#Three treatment goals
+three_groups <- c(
+  "Goal LDL-C/non-HDL-C <55/85 mg/dL" = expression(goal_55_85 == 1),
+  "Goal LDL-C/non-HDL-C <70/100 mg/dL" = expression(goal_55_85 == 0 & goal_70_100 == 1),
+  "Goal LDL-C/non-HDL-C <100/130 mg/dL" = expression(goal_55_85 == 0 & goal_70_100 == 0 & goal_100_130 == 1)
+)
+
+#Loop
+lapply(1:length(three_groups),
+       function(i) {
+         svytotal_df(design = subset(sdata, eval(three_groups[[i]]) & llt == "yes"),
+                     var = ~ goal_need_ldl_non_hdl
+         ) -> df
+         
+         df[, goal := names(three_groups[i])]
+         
+         df[, n_respondents := subset(sdata, eval(three_groups[[i]]) & llt == "yes")$variables[, .N]]
+       }
+) %>%
+  rbindlist -> goal_need_ldl_non_hdl_df
+
+#Relevel factors
+goal_need_ldl_non_hdl_df[, value := fct_relevel(
+  value,
+  c("Meets both LDL-C and non-HDL-C goal",
+    "Meets LDL-C but not non-HDL-C goal",
+    "Does not meet LDL-C goal")
+)]
+goal_need_ldl_non_hdl_df[, goal := fct_relevel(goal, 
+                                       "Goal LDL-C/non-HDL-C <100/130 mg/dL",
+                                       "Goal LDL-C/non-HDL-C <70/100 mg/dL",
+                                       "Goal LDL-C/non-HDL-C <55/85 mg/dL")]
+#Reorder
+setorder(goal_need_ldl_non_hdl_df, goal, value)
+
+#Tabulate
+flextable(goal_need_ldl_non_hdl_df[, .(`Treatment goal` = goal,
+                                       `Respondents, N` = n_respondents,
+                                        `Goal Attainment` = value,
+                                        `Proportion [95% CI], %` = prop_pe_ci,
+                                        `Number [95% CI], millions` = pe_ci)]) %>%
+  bold(j = c(1, 2)) %>%
+    add_footer_row(values = as_paragraph("LDL-C: Low-density lipoprotein cholesterol; Non-HDL-C: Non-high-density lipoprotein cholesterol"),
+                 colwidths = 5) %>%
+  flextable_aes(table_title = "Supplementary Table XXX [Redundant] Goal attainment of low-density and non-high-density lipoprotein cholesterol among US adults with a class I treatment indication per the 2026 ACC/AHA Dysylipidemia Guideline among those on pharmacotherapy, stratified by treatment goal.") %>%
+  merge_v() %>%
+  add_footer_lines(values = as_paragraph(abbs_line)) -> goal_need_ldl_non_hdl_t
+  save_as_docx(goal_need_ldl_non_hdl_t, path = "Tables/Supplementary Table XXX [Redundant].docx")
+
+
+
+
+```
+
+### Tabulate LDL/ApoB
+
+```{r}
+
+
+#Three treatment goals
+three_groups <- c(
+  "Goal LDL-C/apoB goal <55/55 mg/dL " = expression(goal_55_85 == 1),
+  "Goal LDL-C/apoB <70/70 mg/dL" = expression(goal_55_85 == 0 & goal_70_100 == 1),
+  "Goal LDL-C/apoB <100/90 mg/dL" = expression(goal_55_85 == 0 & goal_70_100 == 0 & goal_100_130 == 1)
+)
+
+#Three treatment goals
+#Loop
+lapply(1:length(three_groups),
+       function(i) {
+         svytotal_df(design = subset(sdata, eval(three_groups[[i]]) & llt == "yes"),
+                     var = ~ goal_need_ldl_apo_b
+         ) -> df
+         
+         df[, goal := names(three_groups[i])]
+         
+         df[, n_respondents := subset(sdata, eval(three_groups[[i]]) & llt == "yes")$variables[, .N]]
+       }
+) %>%
+  rbindlist -> goal_need_ldl_apo_b_df
+
+#Relevel factors
+goal_need_ldl_apo_b_df[, value := fct_relevel(
+  value,
+  c("Meets both LDL-C and apoB goal",
+    "Meets LDL-C but not apoB goal",
+    "Does not meet LDL-C goal")
+)]
+
+#Reorder
+setorder(goal_need_ldl_apo_b_df, goal, value)
+
+#Tabulate
+flextable(goal_need_ldl_apo_b_df[, .(`Treatment goal` = goal,
+                                       `Respondents, N` = n_respondents,
+                                       
+                                       `Goal Attainment` = value,
+                                       `Proportion [95% CI], %` = prop_pe_ci,
+                                       `Number [95% CI], millions` = pe_ci)]) %>%
+  bold(j = c(1, 2)) %>%
+  add_footer_row(values = as_paragraph("LDL-C: Low-density lipoprotein cholesterol; apoB: Apolipoprotein B"),
+                 colwidths = 5) %>%
+  flextable_aes(table_title = "Supplementary Table XXX [Redundant]. Goal attainment of low-density and apoB among US adults with a class I treatment indication per the 2026 ACC/AHA Dysylipidemia Guideline among those on pharmacotherapy, stratified by treatment goal.") %>%
+  merge_v() %>%
+  add_footer_lines(values = as_paragraph(abbs_line)) -> goal_need_ldl_apo_b_t
+  save_as_docx(goal_need_ldl_apo_b_t, path = "Tables/Supplementary Table XXX [Redundant].docx")
+
+```
+
+### LDL/non-HDL-C/ApoB
+
+####Among all-comers
+
+```{r}
+
+#Three treatment goals
+three_groups <- c(
+  "Overall" = expression(new_1 == "yes"),
+  "Goal LDL-C/non-HDL-C/apoB goal <55/85/55 mg/dL" = expression(goal_55_85 == 1 & new_1 == "yes"),
+  "Goal LDL-C/non-HDL-C/apoB <70/100/70 mg/dL" = expression(goal_55_85 == 0 & goal_70_100 == 1 & new_1 == "yes"),
+  "Goal LDL-C/non-HDL-C/apoB <100/130/90 mg/dL" = expression(goal_55_85 == 0 & goal_70_100 == 0 & goal_100_130 == 1 & new_1 == "yes")
+)
+
+#Three treatment goals
+
+#Loop
+lapply(c("goal_need_3", "goal_need_3_fw"), function(goal_var) {
+  
+  lapply(seq_along(three_groups), function(i) {
+    
+    # Survey total
+    svytotal_df(
+      design = subset(
+        sdata,
+        eval(three_groups[[i]])
+      ),
+      var = as.formula(paste0("~", goal_var))
+    ) -> df
+    
+    
+    # Merge to add N of respondents
+    merge(
+      df,
+      subset(
+        sdata,
+        eval(three_groups[[i]])
+      )$variables[
+        ,
+        .(n_respondents = .N),
+        by = goal_var
+      ],
+      by.y = goal_var,
+      by.x = "value"
+    ) -> df
+    
+    
+    # Add N of adults
+    df[, n_adults := pe %>% comma]
+    
+    
+    # Totals
+    df[, total_n_respondents :=
+         subset(
+           sdata,
+           eval(three_groups[[i]])
+         )$variables[, .N]
+    ]
+    
+    df[, total_n_adults :=
+         subset(
+           sdata,
+           eval(three_groups[[i]])
+         )$variables[, sum(weight) %>% comma]
+    ]
+    
+    
+    # Missing rows
+    if (nrow(df) < 4) {
+      
+      data.table(
+        var = goal_var,
+        value = data[, unique(goal_need_3 %>% na.omit)[unique(goal_need_3 %>% na.omit) %nin% df$value]],
+        pe = 0,
+        lci = 0,
+        uci = 0,
+        prop_pe = 0,
+        prop_lci = 0,
+        prop_uci = 0,
+        pe_ci = 0,
+        prop_pe_ci = 0,
+        prop_pe_ci_pct = 0,
+        n_adults = 0,
+        n_respondents = 0,
+        total_n_respondents = 0,
+        total_n_adults = 0
+      ) -> add_df
+      
+      df <- rbind(df, add_df)
+    }
+    
+    
+    # Goal
+    df[, goal := names(three_groups[i])]
+    df[, var := goal_var]
+    
+    #LDL type
+    df[, ldl_type := fifelse(
+      goal_var == "goal_need_3",
+      "Martin-Hopkins",
+      "Friedewald"
+    )]
+    
+    df
+  }) %>%
+    rbindlist()
+  
+}) %>%
+  rbindlist() -> goal_need_3_df
+
+#Relevel factors
+goal_need_3_df[, value := fct_relevel(
+  value,
+  c("Meets LDL-C, non-HDL-C, and apoB goals",
+    "Meets LDL-C and non-HDL-C but not apoB goal",
+    "Meets LDL-C but not non-HDL-C goal" ,
+    "Does not meet LDL-C goal")
+)]
+
+goal_need_3_df[, goal := fct_relevel(
+  goal,
+  c("Overall",
+    goal_need_3_df[goal != "Overall", unique(goal)])
+)]
+
+#Reorder
+setorder(goal_need_3_df, goal, -value)
+
+#Tabulate
+flextable(cbind(
+  goal_need_3_df[ldl_type == "Martin-Hopkins", .(
+    `Treatment goal` = goal,
+                   `Goal Attainment` = value,
+                   `Number of US adults` = n_adults %>% str_remove_all(",") %>%
+                     as.numeric %>% round(-3) %>% comma,
+                   `Proportion [95% CI], %` = prop_pe_ci,
+                   `Number [95% CI], millions` = pe_ci)],
+  goal_need_3_df[ldl_type == "Friedewald", .(
+                   `Number of US adults ` = n_adults %>% str_remove_all(",") %>%
+                     as.numeric %>% round(-3) %>% comma,
+                   `Proportion [95% CI], % ` = prop_pe_ci,
+                   `Number [95% CI], millions ` = pe_ci)])
+) %>%
+  bold(j = c(1, 2)) %>%
+    merge_v() %>%
+  add_header_row(values = c("", "Martin-Hopkins LDL-C", "Friedewald LDL-C"), colwidths = c(2, 3, 3)) %>%
+  add_footer_row(values = as_paragraph("LDL-C: Low-density lipoprotein cholesterol; non-HDL-C: non-high-density lipoprotein cholesterol; apoB: Apolipoprotein B"),
+                 colwidths = 8) %>%
+    
+      footnote(i = 5, j = 1, ref_symbols = "*",  
+           value = as_paragraph("Includes class I indications for patients with ASCVD at very high risk.")) %>%
+      footnote(i = 9, j = 1, ref_symbols = "**",  
+           value = as_paragraph("Includes class I indications for patients with a PREVENT-based score of ≥10%, DM or pre-treatment LDL ≥190mg/dL with risk-enhancing factors, or ASCVD that is not at very high risk.")) %>%
+  footnote(i = 13, j = 1, ref_symbols = "***",  
+           value = as_paragraph("Includes class I indications for patients with a PREVENT-based score of 5 to 10% and DM  or pre-treatment LDL ≥190mg/dL without risk-enhancing factors.")) %>%
+  flextable_aes(table_title = "Table 1. Goal attainment of low-density lipoprotein cholesterol, non-high-density lipoprotein cholesterol, and apolipoprotein B among US adults with a class I treatment indication per the 2026 ACC/AHA Dysylipidemia Guideline among those on pharmacotherapy, stratified by treatment goal.") %>%
+  width(width = 1.5) -> goal_need_3_t
+
+#Save
+  save_as_docx(goal_need_3_t, path = "Tables/Table 1.docx")
+
+```
+
+
+####Among those at goal
+
+```{r}
+
+#Loop
+lapply(c("goal_need_3", "goal_need_3_fw"), function(goal_var) {
+  
+  lapply(seq_along(three_groups), function(i) {
+    
+    # Survey total
+    svytotal_df(
+      design = subset(
+        sdata,
+        eval(three_groups[[i]]) &  get(goal_var) != "Does not meet LDL-C goal"
+      ),
+      var = as.formula(paste0("~", goal_var))
+    ) -> df
+    
+    
+    # Merge to add N of respondents
+    merge(
+      df,
+      subset(
+        sdata,
+        eval(three_groups[[i]])
+      )$variables[
+        ,
+        .(n_respondents = .N),
+        by = goal_var
+      ],
+      by.y = goal_var,
+      by.x = "value"
+    ) -> df
+    
+    
+    # Add N of adults
+    df[, n_adults := pe %>% comma]
+    
+    
+    # Totals
+    df[, total_n_respondents :=
+         subset(
+           sdata,
+           eval(three_groups[[i]])
+         )$variables[, .N]
+    ]
+    
+    df[, total_n_adults :=
+         subset(
+           sdata,
+           eval(three_groups[[i]])
+         )$variables[, sum(weight) %>% comma]
+    ]
+    
+    
+    # Missing rows
+    if (nrow(df) < 3) {
+      
+      data.table(
+        var = goal_var,
+        value = data[, unique(goal_need_3 %>% na.omit)[unique(goal_need_3 %>% na.omit) %nin% df$value]],
+        pe = 0,
+        lci = 0,
+        uci = 0,
+        prop_pe = 0,
+        prop_lci = 0,
+        prop_uci = 0,
+        pe_ci = 0,
+        prop_pe_ci = 0,
+        prop_pe_ci_pct = 0,
+        n_adults = 0,
+        n_respondents = 0,
+        total_n_respondents = 0,
+        total_n_adults = 0
+      ) -> add_df
+      
+      df <- rbind(df, add_df)
+    }
+    
+    
+    # Goal
+    df[, goal := names(three_groups[i])]
+    df[, var := goal_var]
+    
+    #LDL type
+    df[, ldl_type := fifelse(
+      goal_var == "goal_need_3",
+      "Martin-Hopkins",
+      "Friedewald"
+    )]
+    
+    df
+  }) %>%
+    rbindlist()
+  
+}) %>%
+  rbindlist() -> goal_need_3_df_at_goal
+```
+
+###Quadrants analysis
+
+#### Y configs
+
+```{r}
+fig1_text_size <- 5
+fig1_rect_alpha <- 0.25
+
+# Y variable lists
+plot_configs <- list(
+  apob = list(
+    yvar          = "apo_b_dist",
+    y_label       = "Distance to Apolipoprotein B Goal (mg/dL)",
+    goal_name     = "apoB",
+    title = "Figure 1B",
+    filename      = "Figures/LDL and ApoB.pdf",
+    coord_ylim    = NULL,
+    labels = list(
+      top_left     = list(x = -50,  y = 25,  text = "Meets LDL-C goal\nbut not apoB goal"),
+      bottom_left  = list(x = -50,  y = -10, text = "Meets LDL-C goal\nand apoB goal"),
+      bottom_right = list(x = 150,  y = -10, text = "Meets apoB goal\nbut not LDL-C goal"),
+      top_right    = list(x = 150,  y = 25,  text = "Does not meet LDL-C goal\nor apoB goal")
+    )
+  ),
+  non_hdl = list(
+    yvar          = "non_hdl_dist",
+    y_label       = "Distance to Non-High-density Lipoprotein Cholesterol Goal (mg/dL)",
+    goal_name     = "non-HDL-C",
+    title = "Figure 1A",
+    filename      = "Figures/LDL and Non-HDL.pdf",
+    coord_ylim    = c(-80, 350),
+    labels = list(
+      top_left     = list(x = -50,  y = 45,  text = "Meets LDL-C goal\nbut not non-HDL-C goal"),
+      bottom_left  = list(x = -55,  y = -45, text = "Meets LDL-C and\nnon-HDL-C\ngoal"),
+      bottom_right = list(x = 150,  y = -35, text = "Meets non-HDL-C goal\nbut not LDL-C goal"),
+      top_right    = list(x = 150,  y = 45,  text = "Does not meet LDL-C goal\nor non-HDL-C goal")
+    )
+  )
+)
+
+```
+
+
+
+#### Function
+
+```{r}
+
+
+# Plot template function
+make_goal_plot <- function(y_cfg, x_variable, data) {
+  
+  p <- ggplot(
+    data = data,
+    aes(x = .data[[x_variable]],
+        y = .data[[y_cfg$yvar]],
+        size = weight)
+  ) +
+    # Point size is mapped to weight (set in the aes() above) for every plot
+    geom_point(alpha = 0.25) +
+    geom_vline(lwd = 1, xintercept = 0) +
+    geom_hline(lwd = 1, yintercept = 0) +
+    # Quadrant rectangles
+    annotate(geom = "rect", fill = "red4",
+             xmax = Inf, ymax = Inf, xmin = 0, ymin = 0,
+             alpha = fig1_rect_alpha) +
+    annotate(geom = "rect", fill = "orange",
+             xmax = 0, ymax = Inf, xmin = -Inf, ymin = 0,
+             alpha = fig1_rect_alpha) +
+    annotate(geom = "rect", fill = "yellow2",
+             xmax = Inf, ymax = 0, xmin = 0, ymin = -Inf,
+             alpha = fig1_rect_alpha) +
+    annotate(geom = "rect", fill = "green4",
+             xmax = 0, ymax = 0, xmin = -Inf, ymin = -Inf,
+             alpha = fig1_rect_alpha) +
+    # Quadrant text labels
+    annotate(geom = "text", size = fig1_text_size, fontface = "bold",
+             x = y_cfg$labels$top_left$x,     y = y_cfg$labels$top_left$y,
+             label = y_cfg$labels$top_left$text) +
+    annotate(geom = "text", size = fig1_text_size, fontface = "bold",
+             x = y_cfg$labels$bottom_left$x,  y = y_cfg$labels$bottom_left$y,
+             label = y_cfg$labels$bottom_left$text) +
+    annotate(geom = "text", size = fig1_text_size, fontface = "bold",
+             x = y_cfg$labels$bottom_right$x, y = y_cfg$labels$bottom_right$y,
+             label = y_cfg$labels$bottom_right$text) +
+    annotate(geom = "text", size = fig1_text_size, fontface = "bold",
+             x = y_cfg$labels$top_right$x,    y = y_cfg$labels$top_right$y,
+             label = y_cfg$labels$top_right$text) +
+    ggtitle(NULL) +
+    #Scales
+    scale_x_continuous(
+      name = "Distance to Low-density Lipoprotein Cholesterol Goal (mg/dL)",
+      breaks = seq(0, 1000, 25)
+    ) +
+    scale_y_continuous(
+      name = y_cfg$y_label,
+      breaks = seq(0, 1000, 25),
+      sec.axis = dup_axis(name = NULL)
+    ) +
+    scale_size_continuous(guide = "none", range = c(5, 10)) +
+    #Theme
+    theme_bw() +
+    theme(title = element_text(size = 14, face = "bold"),
+          strip.text = element_text(size = 18, face = "bold"),
+          plot.subtitle = element_text(face = "bold", size = 11, hjust = 0.0, color = "grey45"),
+          text = element_text(size = 14, face = "bold"),
+          axis.title.x = element_text(size = 18, face = "bold"),
+          axis.title.y = element_text(size = 18, face = "bold"),
+          axis.text.x = element_text(size = 16, face = "bold"),
+          axis.text.y = element_text(size = 16, face = "bold"),
+          legend.position = "bottom",
+          legend.key = element_rect(fill = "transparent"),
+          legend.background = element_rect(fill = "transparent"),
+          legend.text = element_text(size = 17, face = "bold"),
+          legend.key.width = unit(3, "cm")
+    )
+
+  # Only the non-HDL version clips the y-axis
+  if (!is.null(y_cfg$coord_ylim)) {
+    p <- p + coord_cartesian(ylim = y_cfg$coord_ylim)
+  }
+  
+  #Return plot
+  p
+}
+
+```
+
+
+
+#### Loop
+
+```{r}
+xvars <- c("ldl_dist", "ldl_fw_dist")
+#Lapply over x variables
+lapply(xvars,
+       function(xvar) {
+  lapply(plot_configs, 
+         make_goal_plot, 
+         data = sdata$variables,
+         x_variable = xvar
+         )
+       }
+) -> goal_plots
+names(goal_plots) <- xvars
+
+ggsave(goal_plots$ldl_dist$apob, filename = "Figures/LDL vs apoB.pdf", dpi = 600, width = 16, height = 9)
+ggsave(goal_plots$ldl_dist$non_hdl, filename = "Figures/LDL vs non-HDL.pdf", dpi = 600, width = 16, height = 9)
+ggsave(goal_plots$ldl_fw_dist$apob, filename = "Figures/LDL FW vs apoB.pdf", dpi = 600, width = 16, height = 9)
+ggsave(goal_plots$ldl_fw_dist$non_hdl, filename = "Figures/LDL FW vs non-HDL.pdf", dpi = 600, width = 16, height = 9)
+
+svytotal_df(design = sdata,
+            variables = ~ ldl_dist > 0) -> ldl_df
+
+svytotal_df(design = subset(sdata, ldl_dist <= 0),
+            variables = ~ apo_b_dist > 0) -> ldl_apo_b_df
+svytotal_df(design = subset(sdata, ldl_fw_dist <= 0),
+            variables = ~ apo_b_dist > 0) -> ldl_fw_apo_b_df
+
+svytotal_df(design = subset(sdata, ldl_dist <= 0),
+            variables = ~ non_hdl_dist > 0) -> ldl_non_hdl_df
+svytotal_df(design = subset(sdata, ldl_fw_dist <= 0),
+            variables = ~ non_hdl_dist > 0) -> ldl_fw_non_hdl_df
+
+library(jtools)
+svyglm(design = sdata,
+       ldl_dist ~ non_hdl_dist
+       ) %>% summ
+
+svyglm(design = sdata,
+       ldl_dist ~ apo_b_dist
+       ) %>% summ
+
+svyglm(design = sdata,
+       ldl_fw_dist ~ non_hdl_dist
+       ) %>% summ
+
+svyglm(design = sdata,
+       ldl_fw_dist ~ apo_b_dist
+       ) %>% summ
+
+
+
+svycor(design = sdata, ~ ldl_dist + non_hdl_dist) -> h
+svycor(design = sdata, ~ ldl_fw_dist + non_hdl_dist)
+
+svycor(design = sdata, ~ ldl_dist + apo_b_dist)
+svycor(design = sdata, ~ ldl_fw_dist + apo_b_dist)
+
+svycor(design = sdata, ~ non_hdl_dist + apo_b_dist)
+
+```
+
+## LDL vs Apo-B/non-HDL (non-sequential)
+
+```{r}
+sdata$variables[goal_need_ldl == "At goal", sum(weight) %>% comma] 
+svytotal_df(design = subset(sdata, goal_need_ldl == "At goal" ),
+            variables = ~ goal_need_non_hdl) -> goal_need_non_hdl_df
+
+goal_need_non_hdl_df[, sum(prop_pe[2:4])*100]
+
+svytotal_df(design = subset(sdata, goal_need_ldl == "At goal" & ldl < 100),
+            variables = ~ goal_need_apo_b) -> goal_need_apo_b_df
+
+goal_need_apo_b_df[, sum(prop_pe[value != "At goal"])*100]
+
+lapply(
+  c(55, 70, 100),
+  function(ldl_level) {
+    svytotal_df(design = subset(sdata, goal_need_ldl == "At goal" & ldl < ldl_level),
+                variables = ~ goal_need_apo_b) -> ldl_levels_apo_b_df
+    ldl_levels_apo_b_df[, ldl_level := ldl_level]
+    ldl_levels_apo_b_df
+  }
+) -> ldl_levels_apo_b_list
+
+lapply(ldl_levels_apo_b_list, 
+       function(df) {
+         df[, sum(prop_pe[value != "At goal"])*100]
+       }
+) -> ldl_levels_apo_b_perc
+
+ldl_levels_apo_b_perc
+
+```
+
+# Save
+
+```{r}
+save.image("Here.RData")
+
+```
+
+#Compare prevalence estimates with MH vs FW
+
+```{r}
+prev <- svymean(
+  ~ I(goal_need_3 == "Does not meet LDL-C goal") +
+    I(goal_need_3_fw == "Does not meet LDL-C goal"),
+  design = sdata,
+  na.rm = TRUE
+)
+
+# Inspect coefficient names
+names(coef(prev))
+
+# Difference between the two prevalence estimates
+contrast <- svycontrast(
+  prev,
+  c(
+    "I(goal_need_3 == \"Does not meet LDL-C goal\")TRUE" = 1,
+    "I(goal_need_3_fw == \"Does not meet LDL-C goal\")TRUE" = -1
+  )
+)
+
+contrast
+
+t_stat <- coef(contrast) / SE(contrast)
+
+p_value_mh_fw <- 2 * pt(
+  abs(t_stat),
+  df = degf(sdata),
+  lower.tail = FALSE
+)
+
+p_value_mh_fw %>% p
+
+```
+
+# Retrieve needed numbers to drop them in the results
+
+```{r}
+
+#Needed numbers
+#Sample size
+sdata$variables[weight > 0, .N]
+sdata$variables$weight %>% sum %>% tomil
+
+#LDL goals
+sdata$variables[goal_need_3 == "Does not meet LDL-C goal", sum(weight) %>% tomil]
+sdata$variables[, sum(weight[goal_need_3 == "Does not meet LDL-C goal"])/sum(weight)] %>% percent(0.1)
+
+
+#Non-HDL goals
+sdata$variables[, sum(weight[goal_need_3 == "Meets LDL-C but not non-HDL-C goal"])]
+sdata$variables[, sum(weight[goal_need_3 == "Meets LDL-C but not non-HDL-C goal"])/sum(weight)] %>% percent(0.1)
+
+#ApoB goals
+sdata$variables[, sum(weight[goal_need_3 == "Meets LDL-C and non-HDL-C but not apoB goal"])] %>% round(-3)
+sdata$variables[, sum(weight[goal_need_3 == "Meets LDL-C and non-HDL-C but not apoB goal"])/sum(weight)] %>% percent(0.1)
+
+
+
+#P-value for FW vs MH (% controlled)
+p_value_mh_fw
+
+#FW non-HDL or ApoB goals
+sdata$variables[, sum(weight[goal_need_3_fw %in% c("Meets LDL-C but not non-HDL-C goal", "Meets LDL-C and non-HDL-C but not apoB goal")])] %>% tomil
+sdata$variables[!is.na(ldl_fw), sum(weight[goal_need_3_fw %in% c("Meets LDL-C but not non-HDL-C goal", "Meets LDL-C and non-HDL-C but not apoB goal")])/sum(weight[ldl_fw <= ldl_goal])] %>% percent(0.1)
+sdata$variables[ldl <= ldl_goal & !is.na(apo_b), sum(weight[goal_need_3 == "Meets LDL-C and non-HDL-C but not apoB goal"])/sum(weight)] %>% percent(0.1)
+
+
+#%s among those at goal
+goal_need_3_df_at_goal[goal == "Overall" & var == "goal_need_3" , sum(pe)] %>% tomil
+goal_need_3_df_at_goal[goal == "Overall" & var == "goal_need_3" , sum(prop_pe[value != "Meets LDL-C, non-HDL-C, and apoB goals"])] %>% percent(0.1)
+goal_need_3_df_at_goal[goal == "Overall" & var == "goal_need_3" , ]
+goal_need_3_df_at_goal[var == "goal_need_3" & value != "Meets LDL-C, non-HDL-C, and apoB goals", sum(prop_pe) %>% percent(0.1), by = goal]
+
+#%s among those at goal with Friedewald vs MH
+goal_need_3_df_at_goal[goal == "Overall" & var == "goal_need_3_fw" & value != "Meets LDL-C, non-HDL-C, and apoB goals", sum(pe)] %>% tomil
+goal_need_3_df_at_goal[goal == "Overall" & var == "goal_need_3_fw" & value != "Meets LDL-C, non-HDL-C, and apoB goals", sum(prop_pe)] %>% percent(0.1)
+
+
+goal_need_3_df_at_goal[goal == "Overall" & var == "goal_need_3" & value != "Meets LDL-C, non-HDL-C, and apoB goals", sum(pe)] %>% round(-3)
+goal_need_3_df_at_goal[goal == "Overall" & var == "goal_need_3" & value != "Meets LDL-C, non-HDL-C, and apoB goals", sum(prop_pe)] %>% percent(0.1)
+
+
+
+```
